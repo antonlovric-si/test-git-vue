@@ -1,0 +1,92 @@
+name: Auto PR Creation
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [development, uat, main]
+
+jobs:
+  create-pr:
+    name: Create Follow-up PR
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+      - name: Authenticate GitHub CLI
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Create follow-up PR
+        run: |
+          SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+          TARGET_BRANCH="${{ github.event.pull_request.base.ref }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          echo "Merged PR: $SOURCE_BRANCH -> $TARGET_BRANCH"
+          echo "PR Title: $PR_TITLE"
+
+          # Extract branch type from source
+          BRANCH_TYPE=$(echo "$SOURCE_BRANCH" | cut -d'/' -f1)
+
+          # Determine if we need to create a follow-up PR
+          CREATE_PR=false
+          NEW_SOURCE=""
+          NEW_TARGET=""
+
+          case "$TARGET_BRANCH" in
+            "main")
+              if [[ "$BRANCH_TYPE" == "hotfix" ]]; then
+                CREATE_PR=true
+                NEW_SOURCE="main"
+                NEW_TARGET="uat"
+                NEW_TITLE="chore: merge main into uat after hotfix #$PR_NUMBER"
+              fi
+              ;;
+            "uat")
+              if [[ "$SOURCE_BRANCH" == "main" ]] || [[ "$BRANCH_TYPE" == "patch" ]]; then
+                CREATE_PR=true
+                NEW_SOURCE="uat"
+                NEW_TARGET="development"
+                if [[ "$SOURCE_BRANCH" == "main" ]]; then
+                  NEW_TITLE="chore: merge uat into development after main #$PR_NUMBER"
+                else
+                  NEW_TITLE="chore: merge uat into development after patch #$PR_NUMBER"
+                fi
+              fi
+              ;;
+          esac
+
+          if [[ "$CREATE_PR" == "true" ]]; then
+            echo "Creating PR: $NEW_SOURCE -> $NEW_TARGET"
+
+            # Check if PR already exists
+            EXISTING_PR=$(gh pr list --base "$NEW_TARGET" --head "$NEW_SOURCE" --json number --jq '.[0].number // empty')
+
+            if [[ -n "$EXISTING_PR" ]]; then
+              echo "PR already exists: #$EXISTING_PR"
+              exit 0
+            fi
+
+            # Create the PR
+            gh pr create \
+              --title "$NEW_TITLE" \
+              --body "Automatically created after merging #$PR_NUMBER ($SOURCE_BRANCH -> $TARGET_BRANCH)" \
+              --base "$NEW_TARGET" \
+              --head "$NEW_SOURCE" \
+              --draft
+
+            echo "Created follow-up PR: $NEW_SOURCE -> $NEW_TARGET"
+          else
+            echo "No follow-up PR needed"
+          fi
